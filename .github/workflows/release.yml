@@ -1,0 +1,71 @@
+name: Release PicoStream
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. v1.0.1)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update version in script
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          # Remove the 'v' prefix for the VERSION variable in script
+          VERSION_NUM="${VERSION#v}"
+          sed -i "s/^VERSION=\".*\"/VERSION=\"${VERSION_NUM}\"/" install.sh
+
+      - name: Validate script syntax
+        run: bash -n install.sh && echo "✅ Bash syntax OK"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: PicoStream ${{ steps.version.outputs.VERSION }}
+          body: |
+            ## PicoStream ${{ steps.version.outputs.VERSION }}
+
+            DNS Tunnel Layer for 3x-ui / V2Ray — routes traffic through UDP port 53
+
+            ### نصب / Install
+            ```bash
+            bash <(curl -fsSL https://raw.githubusercontent.com/amir6dev/PicoStream/main/install.sh)
+            ```
+
+            ### معماری / Architecture
+            ```
+            Client → DNS UDP:53 → Slipstream → 3x-ui/V2Ray → Internet
+            ```
+
+            ### تغییرات / Changes
+            See [CHANGELOG.md](CHANGELOG.md)
+          files: |
+            install.sh
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
