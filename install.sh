@@ -86,6 +86,7 @@ check_deps() {
 
 # ─── Config Load/Save ─────────────────────────────────────────────────────────
 load_config() {
+    # shellcheck source=/dev/null
     [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE" && return 0
     return 1
 }
@@ -342,6 +343,7 @@ install_management_script() {
     cat > "$SCRIPT_CMD" <<'MGMT'
 #!/bin/bash
 CONFIG_FILE="/etc/picostream/picostream.conf"
+# shellcheck source=/dev/null
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
