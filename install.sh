@@ -81,6 +81,32 @@ check_deps() {
         [ "$PKG" = "apt" ] && apt-get update -qq
         pkg_install "${miss[@]}"
     fi
+
+    # Slipstream binary requires libssl.so.3 (OpenSSL 3.x)
+    # Ubuntu 22.04+ has it in repos; Ubuntu 20.04 needs manual .deb install
+    if [ "$PKG" = "apt" ] && ! ldconfig -p 2>/dev/null | grep -q "libssl.so.3"; then
+        info "libssl.so.3 not found — installing libssl3 (required by Slipstream)..."
+        apt-get update -qq
+        if apt-get install -y libssl3 2>/dev/null; then
+            info "libssl3 installed from repo"
+        else
+            # Ubuntu 20.04 fallback: download .deb directly from Ubuntu 22.04 archive
+            warn "libssl3 not in repos (Ubuntu 20.04). Downloading .deb directly..."
+            local libssl_deb="/tmp/libssl3.deb"
+            local libssl_url="http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl3_3.0.2-0ubuntu1.21_amd64.deb"
+            if [ "$ARCH" = "arm64" ]; then
+                libssl_url="http://ports.ubuntu.com/pool/main/o/openssl/libssl3_3.0.2-0ubuntu1.21_arm64.deb"
+            elif [ "$ARCH" = "armv7" ]; then
+                libssl_url="http://ports.ubuntu.com/pool/main/o/openssl/libssl3_3.0.2-0ubuntu1.21_armhf.deb"
+            fi
+            curl -fsSL "$libssl_url" -o "$libssl_deb" || \
+                { err "Failed to download libssl3. Check internet connection."; exit 1; }
+            dpkg -i "$libssl_deb" && rm -f "$libssl_deb" || \
+                { err "Failed to install libssl3."; exit 1; }
+            info "libssl3 installed from .deb"
+        fi
+    fi
+
     info "All dependencies OK"
 }
 
@@ -230,17 +256,93 @@ gather_input() {
 install_slipstream() {
     step "Installing Slipstream"
 
+    # Check if prebuilt binary will work (needs libssl.so.3 + libc6 >= 2.34)
+    # Ubuntu 20.04 has libc6 2.31 — must build from source
+    local needs_build=false
+    if [ "$PKG" = "apt" ]; then
+        local libc_ver
+        libc_ver=$(dpkg -l libc6 2>/dev/null | grep "^ii" | awk '{print $3}' | cut -d'-' -f1)
+        # Compare: if libc6 < 2.34, prebuilt won't work
+        if [ -n "$libc_ver" ]; then
+            local major minor
+            major=$(echo "$libc_ver" | cut -d'.' -f1)
+            minor=$(echo "$libc_ver" | cut -d'.' -f2)
+            if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 34 ]; }; then
+                warn "libc6 ${libc_ver} detected (need >= 2.34) — building Slipstream from source..."
+                needs_build=true
+            fi
+        fi
+    fi
+
+    if [ "$needs_build" = true ]; then
+        build_slipstream_from_source
+        return
+    fi
+
     local fname="slipstream-server-linux-${ARCH}"
     local url="${RELEASE_URL}/${fname}"
 
     info "Downloading: $url"
     if ! curl -fsSL --max-time 60 "$url" -o "${SLIPSTREAM_BIN}.tmp"; then
-        err "Download failed. Check your internet connection or try again."
-        exit 1
+        warn "Download failed, falling back to source build..."
+        build_slipstream_from_source
+        return
     fi
     mv "${SLIPSTREAM_BIN}.tmp" "$SLIPSTREAM_BIN"
     chmod +x "$SLIPSTREAM_BIN"
+
+    # Quick test — if binary fails to run, build from source
+    if ! "$SLIPSTREAM_BIN" --version &>/dev/null && ! "$SLIPSTREAM_BIN" --help &>/dev/null; then
+        warn "Prebuilt binary failed to run (likely missing libssl.so.3), building from source..."
+        build_slipstream_from_source
+        return
+    fi
     info "Installed at: $SLIPSTREAM_BIN"
+}
+
+build_slipstream_from_source() {
+    step "Building Slipstream from source (Ubuntu 20.04 compatibility)"
+    info "This will take 15-25 minutes. Please wait..."
+
+    # Install build dependencies
+    [ "$PKG" = "apt" ] && apt-get update -qq &&         DEBIAN_FRONTEND=noninteractive apt-get install -y             build-essential cmake pkg-config libssl-dev git curl -qq
+    [ "$PKG" = "dnf" ] && dnf install -y gcc make cmake pkgconfig openssl-devel git curl
+    [ "$PKG" = "yum" ] && yum install -y gcc make cmake pkgconfig openssl-devel git curl
+
+    # Install Rust if not present
+    if ! command -v cargo &>/dev/null; then
+        info "Installing Rust toolchain..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --quiet
+        # shellcheck source=/dev/null
+        source "$HOME/.cargo/env"
+    else
+        # shellcheck source=/dev/null
+        source "$HOME/.cargo/env" 2>/dev/null || true
+    fi
+
+    # Clone source
+    local src_dir="/tmp/slipstream-src"
+    rm -rf "$src_dir"
+    info "Cloning slipstream-rust source..."
+    git clone --depth=1 https://github.com/Mygod/slipstream-rust.git "$src_dir" ||     git clone --depth=1 https://github.com/Fox-Fig/slipstream-rust-plus.git "$src_dir" ||     { err "Failed to clone source. Check internet connection."; exit 1; }
+
+    cd "$src_dir"
+    git submodule update --init --recursive
+
+    info "Compiling... (this takes a while)"
+    cargo build --release -p slipstream-server 2>&1 | tail -5
+
+    if [ ! -f "target/release/slipstream-server" ]; then
+        err "Build failed. Check logs above."
+        exit 1
+    fi
+
+    cp target/release/slipstream-server "$SLIPSTREAM_BIN"
+    chmod +x "$SLIPSTREAM_BIN"
+    rm -rf "$src_dir"
+    info "Slipstream built and installed from source"
+    # shellcheck source=/dev/null
+    source "$HOME/.cargo/env" 2>/dev/null || true
 }
 
 # ─── TLS Certificates ─────────────────────────────────────────────────────────
