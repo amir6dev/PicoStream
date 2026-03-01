@@ -17,7 +17,10 @@ jobs:
         run: sudo apt-get install -y shellcheck
 
       - name: Run ShellCheck
-        run: shellcheck -S warning install.sh
+        run: |
+          for f in install.sh install-exit.sh install-relay.sh; do
+            [ -f "$f" ] && shellcheck -S warning "$f" && echo "✅ $f passed"
+          done
 
   bash-syntax:
     runs-on: ubuntu-latest
@@ -26,4 +29,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Check bash syntax
-        run: bash -n install.sh && echo "✅ Syntax OK"
+        run: |
+          for f in install.sh install-exit.sh install-relay.sh; do
+            [ -f "$f" ] && bash -n "$f" && echo "✅ $f syntax OK"
+          done
