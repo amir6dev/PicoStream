@@ -1,77 +1,112 @@
 # PicoStream
 
-**DNS Tunnel layer for 3x-ui / V2Ray panels**  
-Wrap your existing V2Ray inbound with a UDP tunnel on any port (53, 80, 443, 8080, ...) to bypass restrictive firewalls.
+**DNS Tunnel layer for 3x-ui / V2Ray — Two-server architecture**
+
+Users connect with a **normal V2Ray link** (VLESS/VMess/Trojan) — no special client app needed.  
+Traffic is hidden inside DNS queries, bypassing firewalls that block 4% of ports.
 
 ```
-Client (Iran/restricted network)
-        |
-        v
- UDP port 53 / 80 / 443  (your choice)
-        |
-        v
-  Slipstream tunnel
-        |
-        v
-  127.0.0.1:YOUR_V2RAY_PORT  (3x-ui inbound)
-        |
-        v
-     Internet
+User (v2rayNG / Hiddify — normal VLESS config)
+         |
+         | TCP — any port (443 / 80 / 8080)
+         v
+  ┌─────────────────────┐
+  │   RELAY Server      │  ← Server 1 (can be in restricted zone)
+  │  slipstream-client  │
+  └─────────────────────┘
+         |
+         | DNS tunnel (UDP port 53)
+         | traffic looks like normal DNS queries
+         v
+  ┌─────────────────────┐
+  │   EXIT Server       │  ← Server 2 (outside / free zone)
+  │  slipstream-server  │
+  │  3x-ui panel        │
+  └─────────────────────┘
+         |
+         v
+      Internet
 ```
 
 ---
 
 ## Requirements
 
-| Item | Notes |
-|------|-------|
-| VPS / Server | Ubuntu 20+, Debian 10+, CentOS 7+, Rocky 8+ |
-| 3x-ui panel | Already installed with at least one active inbound |
-| Open UDP port | The tunnel port you choose must be open in your firewall |
-| Root access | Required for iptables and systemd |
+| | Relay (Server 1) | Exit (Server 2) |
+|---|---|---|
+| Location | Anywhere (even restricted) | Outside / free network |
+| What runs | slipstream-client | slipstream-server + 3x-ui |
+| Open ports | TCP ENTRY_PORT (e.g. 443) | UDP 53 |
+| OS | Ubuntu 22.04+ / Debian 12+ | Ubuntu 22.04+ / Debian 12+ |
 
 ---
 
-## Quick Install
+## Installation
+
+### Step 1 — Exit Server (outside, with 3x-ui)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/amir6dev/PicoStream/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/amir6dev/PicoStream/main/install-exit.sh)
 ```
 
-The script will ask you:
-1. **Your V2Ray link** (paste from 3x-ui) — OR — enter port/UUID manually
-2. **Tunnel port** — which UDP port to expose (default: 53)
-3. **Server domain or IP** (auto-detected if left blank)
+This installs `slipstream-server` and forwards traffic to your existing 3x-ui panel.
+
+### Step 2 — Relay Server (entry point)
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/amir6dev/PicoStream/main/install-relay.sh)
+```
+
+This installs `slipstream-client`, sets up iptables, and outputs a ready-to-use V2Ray link.
 
 ---
 
-## What it does
+## How it works
 
-- Installs **Slipstream** (lightweight Rust DNS tunnel binary)
-- Sets up an **iptables** rule: `UDP:TUNNEL_PORT → :INTERNAL_PORT`
-- Creates a **systemd service** that auto-starts on reboot
-- Generates a **new client link** with your chosen tunnel port
-- Provides a **`picostream`** CLI for management
+1. User imports the V2Ray link (pointing to relay server's IP and entry port)
+2. v2rayNG connects normally to relay server TCP port
+3. Relay server's iptables redirects incoming TCP → local slipstream-client
+4. slipstream-client wraps the traffic inside DNS queries and sends to exit server
+5. DNS queries pass through public resolvers (1.1.1.1, 8.8.8.8) to exit server
+6. Exit server's slipstream-server decodes DNS → forwards to 3x-ui
+7. 3x-ui handles the actual V2Ray protocol and routes to internet
+
+---
+
+## Why DNS tunnel bypasses firewalls
+
+Restrictive firewalls (like in Iran with 4% open networks) usually allow:
+- UDP port 53 (DNS) — always open, queries to 1.1.1.1/8.8.8.8 look normal
+- TCP port 80/443 — usually open for HTTP/HTTPS
+
+PicoStream hides your entire traffic inside legitimate-looking DNS requests.
 
 ---
 
 ## Management
 
+**Exit server:**
 ```bash
-picostream          # Show status
-picostream start    # Start tunnel
-picostream stop     # Stop tunnel
-picostream restart  # Restart tunnel
-picostream logs     # Live logs
-picostream link     # Show client connection link
-picostream uninstall  # Remove everything
+picostream-exit status
+picostream-exit logs
+picostream-exit restart
+picostream-exit uninstall
+```
+
+**Relay server:**
+```bash
+picostream-relay status
+picostream-relay logs
+picostream-relay restart
+picostream-relay link      # show client V2Ray link
+picostream-relay uninstall
 ```
 
 ---
 
 ## Client Apps
 
-Import the generated link in any of these:
+Users import the generated V2Ray link — any standard app works:
 
 | App | Platform |
 |-----|----------|
@@ -79,85 +114,49 @@ Import the generated link in any of these:
 | **Hiddify** | Android / iOS / Windows / macOS |
 | **NekoRay** | Windows / Linux |
 | **V2Box** | iOS |
-| **Clash Meta** | All platforms |
 
 ---
 
-## Port Selection Guide
+## Firewall checklist
 
-| Port | Protocol | Notes |
-|------|----------|-------|
-| **53** | DNS (UDP) | Passes through almost all firewalls |
-| **80** | HTTP | Usually allowed, even on restricted networks |
-| **443** | HTTPS | Encrypted traffic, rarely inspected |
-| **8080** | HTTP alt | Good alternative to 80 |
-| **2053** | DNS alt | Used by some CDNs |
+**Exit server:** open UDP 53 (or your chosen tunnel port)
 
-> **Note:** Make sure the chosen port is open in your VPS firewall / security group (both inbound UDP).
-
----
-
-## Firewall / Security Group
-
-Open the tunnel port in your VPS provider's firewall **and** in the server's own firewall:
+**Relay server:** open TCP on your entry port (443, 80, 8080, etc.)
 
 ```bash
-# UFW (Ubuntu/Debian)
-ufw allow TUNNEL_PORT/udp
+# UFW
+ufw allow 53/udp       # exit server
+ufw allow 443/tcp      # relay server
 
-# firewalld (CentOS/Rocky)
-firewall-cmd --add-port=TUNNEL_PORT/udp --permanent
+# firewalld
+firewall-cmd --add-port=53/udp --permanent
+firewall-cmd --add-port=443/tcp --permanent
 firewall-cmd --reload
-
-# iptables direct
-iptables -I INPUT -p udp --dport TUNNEL_PORT -j ACCEPT
 ```
 
 ---
 
 ## Troubleshooting
 
-**Service not starting**
+**Relay logs:**
 ```bash
-journalctl -u slipstream-server -n 50
+journalctl -u picostream-relay -n 50
 ```
 
-**Check iptables rule**
+**Exit logs:**
+```bash
+journalctl -u picostream-exit -n 50
+```
+
+**Test DNS tunnel from relay:**
+```bash
+nslookup google.com 1.1.1.1
+```
+
+**Check iptables redirect:**
 ```bash
 iptables -t nat -L PREROUTING -n -v
 ```
-
-**Check V2Ray port is listening**
-```bash
-ss -tlnp | grep V2RAY_PORT
-```
-
-**Connection timeout on client**
-- Make sure UDP is open on your VPS firewall for the tunnel port
-- Verify 3x-ui inbound is enabled and running
-- Try port 53 if other ports are blocked
-
----
-
-## Uninstall
-
-```bash
-picostream uninstall
-```
-
-This removes: Slipstream binary, systemd services, iptables rules, config files.  
-Your 3x-ui panel is **not** touched.
-
----
-
-## How it differs from PicoTun
-
-| | PicoTun | PicoStream |
-|---|---------|-----------|
-| V2Ray | Installs its own Xray | Uses your existing 3x-ui |
-| Setup | Full stack | Tunnel layer only |
-| Complexity | Higher | Minimal |
-| Use case | Fresh VPS | Already have 3x-ui |
 
 ---
 
