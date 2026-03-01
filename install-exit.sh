@@ -26,9 +26,10 @@ echo ""
 
 # OS + Arch
 [ -f /etc/os-release ] && source /etc/os-release
-command -v apt-get &>/dev/null && PKG="apt" || \
-command -v dnf     &>/dev/null && PKG="dnf" || \
-command -v yum     &>/dev/null && PKG="yum" || err "Unsupported package manager"
+if command -v apt-get &>/dev/null; then PKG="apt"
+elif command -v dnf  &>/dev/null; then PKG="dnf"
+elif command -v yum  &>/dev/null; then PKG="yum"
+else err "Unsupported package manager"; fi
 case "$(uname -m)" in
     x86_64)  ARCH="amd64" ;;
     aarch64) ARCH="arm64" ;;
