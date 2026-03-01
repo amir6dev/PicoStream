@@ -3,10 +3,13 @@
 # ║        PicoStream RELAY — سرور ایران (entry point)              ║
 # ║        github.com/amir6dev/PicoStream                           ║
 # ╚══════════════════════════════════════════════════════════════════╝
-# bash <(curl -fsSL https://raw.githubusercontent.com/amir6dev/PicoStream/main/install-relay.sh)
 #
-# معماری:
-# User (VLESS) → TCP:ENTRY_PORT → slipstream-client → DNS → exit server → 3x-ui
+# دو حالت نصب:
+#   حالت اتوماتیک:  bash install-relay.sh
+#   حالت دستی:      bash install-relay.sh --offline
+#
+# حالت دستی: قبلاً باید slipstream-client رو آپلود کنی:
+#   scp slipstream-client-linux-amd64 root@IRAN_IP:/tmp/slipstream-client
 
 set -e
 [[ $EUID -ne 0 ]] && echo "[ERROR] Run as root (sudo -i)" && exit 1
@@ -17,14 +20,26 @@ info() { echo -e "${GREEN}[✓]${NC} $1"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 err()  { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 ask()  { echo -ne "${BLUE}[?]${NC} $1"; }
+step() { echo -e "\n${CYAN}── $1 ──────────────────────────────────────${NC}"; }
 
 CLIENT_BIN="/usr/local/bin/slipstream-client"
 CONFIG_DIR="/etc/picostream"
 RELEASE_URL="https://github.com/Fox-Fig/slipstream-rust-deploy/releases/latest/download"
+OFFLINE_MODE=0
+
+# ─── Parse args ──────────────────────────────────────────────────
+for arg in "$@"; do
+    case "$arg" in
+        --offline|-o) OFFLINE_MODE=1 ;;
+    esac
+done
 
 echo ""
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${CYAN}     PicoStream RELAY — Iran/Entry Server Setup      ${NC}"
+if [ "$OFFLINE_MODE" = "1" ]; then
+echo -e "${YELLOW}     حالت دستی (Offline Mode)                        ${NC}"
+fi
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
@@ -42,7 +57,7 @@ elif command -v dnf &>/dev/null; then
 elif command -v yum &>/dev/null; then
     PKG="yum"
 else
-    err "Unsupported package manager"
+    PKG="none"
 fi
 
 case "$(uname -m)" in
@@ -51,38 +66,58 @@ case "$(uname -m)" in
     armv7l)  ARCH="armv7" ;;
     *) err "Unsupported arch: $(uname -m)" ;;
 esac
-info "OS: $NAME | Arch: $ARCH | PKG: $PKG"
+info "OS: ${NAME:-Linux} | Arch: $ARCH"
 
-# ─── Install deps ─────────────────────────────────────────────────
-if [ "$PKG" = "apt" ]; then
-    apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y curl iptables-persistent -qq 2>/dev/null || \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y curl iptables -qq
-elif [ "$PKG" = "dnf" ]; then
-    dnf install -y curl iptables
-elif [ "$PKG" = "yum" ]; then
-    yum install -y curl iptables
+# ─── Install deps (اگه ممکنه) ─────────────────────────────────────
+step "Dependencies"
+if [ "$OFFLINE_MODE" = "0" ] && [ "$PKG" != "none" ]; then
+    if [ "$PKG" = "apt" ]; then
+        apt-get update -qq 2>/dev/null && \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y curl iptables -qq 2>/dev/null || \
+        warn "apt failed — continuing with what's available"
+    elif [ "$PKG" = "dnf" ]; then
+        dnf install -y curl iptables 2>/dev/null || warn "dnf failed"
+    elif [ "$PKG" = "yum" ]; then
+        yum install -y curl iptables 2>/dev/null || warn "yum failed"
+    fi
+else
+    warn "Offline mode — skipping package install"
 fi
+
+# Check required tools
+for tool in iptables; do
+    command -v "$tool" &>/dev/null || err "$tool not found. Install it manually: apt-get install -y $tool"
+done
 
 # libssl3
 if [ "$PKG" = "apt" ] && ! ldconfig -p 2>/dev/null | grep -q "libssl.so.3"; then
-    if ! apt-get install -y libssl3 2>/dev/null; then
-        warn "libssl3 not in repos — downloading..."
-        if [ "$ARCH" = "arm64" ]; then
-            LIBSSL_URL="http://ports.ubuntu.com/pool/main/o/openssl/libssl3_3.0.2-0ubuntu1.21_arm64.deb"
-        else
-            LIBSSL_URL="http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl3_3.0.2-0ubuntu1.21_amd64.deb"
+    if [ "$OFFLINE_MODE" = "0" ]; then
+        if ! apt-get install -y libssl3 2>/dev/null; then
+            warn "Downloading libssl3..."
+            if [ "$ARCH" = "arm64" ]; then
+                LIBSSL_URL="http://ports.ubuntu.com/pool/main/o/openssl/libssl3_3.0.2-0ubuntu1.21_arm64.deb"
+            else
+                LIBSSL_URL="http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl3_3.0.2-0ubuntu1.21_amd64.deb"
+            fi
+            curl -fsSL "$LIBSSL_URL" -o /tmp/libssl3.deb 2>/dev/null && \
+            dpkg -i /tmp/libssl3.deb 2>/dev/null || true
+            rm -f /tmp/libssl3.deb
         fi
-        curl -fsSL "$LIBSSL_URL" -o /tmp/libssl3.deb
-        dpkg -i /tmp/libssl3.deb 2>/dev/null || true
-        rm -f /tmp/libssl3.deb
+    else
+        # Offline: check /tmp for pre-uploaded deb
+        if [ -f /tmp/libssl3.deb ]; then
+            info "Installing libssl3 from /tmp/libssl3.deb..."
+            dpkg -i /tmp/libssl3.deb 2>/dev/null || true
+        else
+            warn "libssl3 not found. If slipstream-client fails, upload libssl3.deb to /tmp/"
+        fi
     fi
-    info "libssl3 ready"
 fi
+info "Dependencies checked"
 
 # ─── Input ────────────────────────────────────────────────────────
+step "Configuration"
 echo ""
-echo -e "  ${BOLD}اطلاعات از سرور خارج (exit server):${NC}"
 ask "  Tunnel domain (e.g. t.example.com): "
 read -r TUNNEL_DOMAIN
 [[ -z "$TUNNEL_DOMAIN" ]] && err "Domain required"
@@ -96,16 +131,15 @@ read -r V2RAY_PROTOCOL
 V2RAY_PROTOCOL="${V2RAY_PROTOCOL:-vless}"
 
 echo ""
-echo -e "  ${BOLD}DNS resolvers:${NC}"
-echo -e "  باید همون resolvers که روی exit زدی بزنی"
-echo -e "  مثال: ${CYAN}8.8.8.8,8.8.4.4${NC}"
+echo -e "  ${BOLD}DNS resolvers${NC} (باید از سرور ایران قابل دسترس باشن):"
+echo -e "  ${CYAN}8.8.8.8${NC} Google  |  ${CYAN}8.8.4.4${NC} Google  |  ${CYAN}1.1.1.1${NC} Cloudflare"
 ask "  Resolvers (default: 8.8.8.8,8.8.4.4): "
 read -r RESOLVERS_INPUT
 RESOLVERS_INPUT="${RESOLVERS_INPUT:-8.8.8.8,8.8.4.4}"
 
 echo ""
-echo -e "  ${BOLD}Entry port${NC} — پورتی که کاربران بهش وصل می‌شن:"
-echo -e "  ${CYAN}443${NC}  |  ${CYAN}80${NC}  |  ${CYAN}8443${NC}  |  ${CYAN}2053${NC}  |  هر پورت دیگه"
+echo -e "  ${BOLD}Entry port${NC} — پورتی که کاربران وصل می‌شن:"
+echo -e "  ${CYAN}443${NC}  |  ${CYAN}80${NC}  |  ${CYAN}8443${NC}  |  ${CYAN}2053${NC}"
 ask "  Entry port (default: 443): "
 read -r ENTRY_PORT
 ENTRY_PORT="${ENTRY_PORT:-443}"
@@ -115,29 +149,93 @@ RELAY_IP=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null || \
            hostname -I | awk '{print $1}')
 info "Relay IP: $RELAY_IP"
 
-# ─── Download slipstream-client ───────────────────────────────────
-info "Downloading slipstream-client..."
-curl -fsSL --max-time 90 \
-    "${RELEASE_URL}/slipstream-client-linux-${ARCH}" \
-    -o "${CLIENT_BIN}.tmp" || err "Download failed"
-mv "${CLIENT_BIN}.tmp" "$CLIENT_BIN"
-chmod +x "$CLIENT_BIN"
-info "slipstream-client installed"
+# ─── Install slipstream-client ────────────────────────────────────
+step "Installing slipstream-client"
 
-# ─── Build resolver args ──────────────────────────────────────────
-RESOLVER_ARGS=""
+if [ -f "$CLIENT_BIN" ] && [ "$OFFLINE_MODE" = "0" ]; then
+    warn "Binary already exists at $CLIENT_BIN — skipping download"
+    info "To reinstall, delete it first: rm -f $CLIENT_BIN"
+
+elif [ "$OFFLINE_MODE" = "1" ]; then
+    # Offline: look for pre-uploaded binary
+    FOUND_BIN=""
+    for path in \
+        "/tmp/slipstream-client" \
+        "/tmp/slipstream-client-linux-${ARCH}" \
+        "/root/slipstream-client" \
+        "/home/slipstream-client"; do
+        if [ -f "$path" ]; then
+            FOUND_BIN="$path"
+            break
+        fi
+    done
+
+    if [ -n "$FOUND_BIN" ]; then
+        cp "$FOUND_BIN" "$CLIENT_BIN"
+        chmod +x "$CLIENT_BIN"
+        info "Binary installed from: $FOUND_BIN"
+    else
+        echo ""
+        echo -e "${RED}╔══════════════════════════════════════════════════════╗${NC}"
+        echo -e "${RED}║  Binary not found! Upload it first:                  ║${NC}"
+        echo -e "${RED}╚══════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "  ${BOLD}روی کامپیوتر یا سرور خارج:${NC}"
+        echo -e "  ${YELLOW}# دانلود:${NC}"
+        echo -e "  curl -Lo slipstream-client-linux-${ARCH} \\"
+        echo -e "    ${CYAN}https://github.com/Fox-Fig/slipstream-rust-deploy/releases/latest/download/slipstream-client-linux-${ARCH}${NC}"
+        echo ""
+        echo -e "  ${YELLOW}# آپلود به سرور ایران:${NC}"
+        echo -e "  ${CYAN}scp slipstream-client-linux-${ARCH} root@${RELAY_IP}:/tmp/slipstream-client${NC}"
+        echo ""
+        echo -e "  بعد دوباره اجرا کن:  ${YELLOW}bash install-relay.sh --offline${NC}"
+        echo ""
+        exit 1
+    fi
+
+else
+    # Online: download from GitHub
+    info "Downloading slipstream-client (${ARCH})..."
+    if curl -fsSL --max-time 90 \
+        "${RELEASE_URL}/slipstream-client-linux-${ARCH}" \
+        -o "${CLIENT_BIN}.tmp" 2>/dev/null; then
+        mv "${CLIENT_BIN}.tmp" "$CLIENT_BIN"
+        chmod +x "$CLIENT_BIN"
+        info "Downloaded and installed"
+    else
+        echo ""
+        echo -e "${RED}Download failed! Try offline mode:${NC}"
+        echo ""
+        echo -e "  ${BOLD}روی کامپیوتر / سرور خارج:${NC}"
+        echo -e "  curl -Lo slipstream-client \\"
+        echo -e "    ${CYAN}${RELEASE_URL}/slipstream-client-linux-${ARCH}${NC}"
+        echo -e "  ${CYAN}scp slipstream-client root@${RELAY_IP}:/tmp/slipstream-client${NC}"
+        echo ""
+        echo -e "  بعد: ${YELLOW}bash install-relay.sh --offline${NC}"
+        echo ""
+        exit 1
+    fi
+fi
+
+# Verify binary works
+"$CLIENT_BIN" --help &>/dev/null || \
+"$CLIENT_BIN" --version &>/dev/null || \
+"$CLIENT_BIN" --resolver 8.8.8.8:53 --domain test.example.com \
+    --tcp-listen-host 127.0.0.1 --tcp-listen-port 19999 &>/dev/null & \
+sleep 1 && kill $! 2>/dev/null || true
+info "Binary OK"
+
+# ─── Build resolver args for service ─────────────────────────────
+RESOLVER_LINES=""
 IFS=',' read -ra RES_ARR <<< "$RESOLVERS_INPUT"
 for r in "${RES_ARR[@]}"; do
     r=$(echo "$r" | tr -d ' ')
     [[ "$r" != *:* ]] && r="${r}:53"
-    RESOLVER_ARGS="${RESOLVER_ARGS}    --resolver ${r} \\"$'\n'
+    RESOLVER_LINES="${RESOLVER_LINES}    --resolver ${r} \\"$'\n'
 done
-# remove trailing backslash-newline, add final args
-RESOLVER_ARGS="${RESOLVER_ARGS}    --domain ${TUNNEL_DOMAIN} \\"$'\n'
-RESOLVER_ARGS="${RESOLVER_ARGS}    --tcp-listen-host 0.0.0.0 \\"$'\n'
-RESOLVER_ARGS="${RESOLVER_ARGS}    --tcp-listen-port ${ENTRY_PORT}"
 
 # ─── Systemd service ─────────────────────────────────────────────
+step "Creating systemd service"
 cat > /etc/systemd/system/picostream-relay.service <<EOF
 [Unit]
 Description=PicoStream RELAY — slipstream-client
@@ -146,7 +244,9 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=${CLIENT_BIN} \\
-${RESOLVER_ARGS}
+${RESOLVER_LINES}    --domain ${TUNNEL_DOMAIN} \\
+    --tcp-listen-host 0.0.0.0 \\
+    --tcp-listen-port ${ENTRY_PORT}
 Restart=always
 RestartSec=5
 LimitNOFILE=65535
@@ -203,23 +303,21 @@ cat > /usr/local/bin/picostream-relay <<'MGMT'
 #!/bin/bash
 # shellcheck source=/dev/null
 [ -f /etc/picostream/relay.conf ] && source /etc/picostream/relay.conf
-G='\033[0;32m'; R='\033[0;31m'; C='\033[0;36m'; Y='\033[1;33m'; B='\033[1m'; N='\033[0m'
+G='\033[0;32m'; R='\033[0;31m'; C='\033[0;36m'; B='\033[1m'; N='\033[0m'
 case "${1:-status}" in
     status)
         echo -e "\n${B}=== PicoStream RELAY ===${N}"
         systemctl is-active --quiet picostream-relay && \
             echo -e "  Service  : ${G}Running ✓${N}" || echo -e "  Service  : ${R}Stopped ✗${N}"
-        echo -e "  Users    → TCP:${ENTRY_PORT}"
-        echo -e "  DNS      → ${C}${TUNNEL_DOMAIN}${N}"
+        echo -e "  Port     : TCP ${ENTRY_PORT}"
+        echo -e "  Domain   : ${C}${TUNNEL_DOMAIN}${N}"
         echo -e "  Resolver : ${C}${RESOLVERS_INPUT}${N}"
         echo "";;
     logs)    journalctl -u picostream-relay -n 60 -f ;;
     restart) systemctl restart picostream-relay && echo "Restarted" ;;
     link)
         echo ""
-        # shellcheck source=/dev/null
-        [ -f /etc/picostream/relay.conf ] && source /etc/picostream/relay.conf
-        echo -e "${B}Client link:${N}"
+        echo -e "\033[1mClient link:\033[0m"
         cat /etc/picostream/client_link.txt 2>/dev/null
         echo "";;
     uninstall)
@@ -243,16 +341,16 @@ chmod +x /usr/local/bin/picostream-relay
 echo ""
 echo -e "${GREEN}╔═════════════════════════════════════════════════════════╗${NC}"
 if systemctl is-active --quiet picostream-relay.service; then
-    echo -e "${GREEN}║  ✓  RELAY server is RUNNING                             ║${NC}"
+    echo -e "${GREEN}║  ✓  RELAY is RUNNING                                    ║${NC}"
 else
     echo -e "${RED}║  ✗  Service failed — run: picostream-relay logs         ║${NC}"
 fi
 echo -e "${GREEN}╚═════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "  ${BOLD}مسیر traffic:${NC}"
-echo -e "  ${YELLOW}User${NC} → ${CYAN}TCP:${ENTRY_PORT}${NC} → slipstream → ${CYAN}DNS${NC} → exit → ${CYAN}3x-ui${NC}"
+echo -e "  User → ${CYAN}TCP:${ENTRY_PORT}${NC} → DNS:${RESOLVERS_INPUT} → ${CYAN}${TUNNEL_DOMAIN}${NC} → exit → 3x-ui"
 echo ""
-echo -e "  ${BOLD}${YELLOW}لینک کاربر (import در v2rayNG / Hiddify):${NC}"
+echo -e "  ${BOLD}${YELLOW}لینک کاربر:${NC}"
 echo ""
 echo -e "  ${YELLOW}${CLIENT_LINK}${NC}"
 echo ""
