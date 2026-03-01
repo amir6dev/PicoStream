@@ -72,9 +72,10 @@ info "OS: ${NAME:-Linux} | Arch: $ARCH"
 step "Dependencies"
 if [ "$OFFLINE_MODE" = "0" ] && [ "$PKG" != "none" ]; then
   if [ "$PKG" = "apt" ]; then
-  apt-get update -qq 2>/dev/null && \
+  info "Trying apt-get update (10s timeout)..."
+  timeout 10 apt-get update -qq 2>/dev/null || warn "apt-get update skipped (no internet or slow)"
   DEBIAN_FRONTEND=noninteractive apt-get install -y curl iptables -qq 2>/dev/null || \
-  warn "apt failed — continuing with what's available"
+  warn "apt install failed — continuing with what's available"
   elif [ "$PKG" = "dnf" ]; then
   dnf install -y curl iptables 2>/dev/null || warn "dnf failed"
   elif [ "$PKG" = "yum" ]; then
@@ -142,9 +143,14 @@ ask "  Entry port (default: 443): "
 read -r ENTRY_PORT
 ENTRY_PORT="${ENTRY_PORT:-443}"
 
-RELAY_IP=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null || \
-  curl -s4 --max-time 5 icanhazip.com 2>/dev/null || \
-  hostname -I | awk '{print $1}')
+if [ "$OFFLINE_MODE" = "1" ]; then
+  RELAY_IP=$(hostname -I | awk '{print $1}')
+  ask "  This server public IP (detected: ${RELAY_IP}, press Enter to confirm): "
+  read -r RELAY_IP_INPUT
+  [ -n "$RELAY_IP_INPUT" ] && RELAY_IP="$RELAY_IP_INPUT"
+else
+  RELAY_IP=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null ||     curl -s4 --max-time 5 icanhazip.com 2>/dev/null ||     hostname -I | awk '{print $1}')
+fi
 info "Relay IP: $RELAY_IP"
 
 # ─── Install slipstream-client ────────────────────────────────────
